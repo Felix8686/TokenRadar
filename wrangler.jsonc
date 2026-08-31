@@ -30,7 +30,7 @@
     "APP_NAME": "AI-Radar",
     "APP_TIMEZONE": "Asia/Shanghai",
     "AI_ENABLED": "true",
-    "AI_MODEL": "@cf/meta/llama-3.1-8b-instruct",
+    "AI_MODEL": "@cf/meta/llama-3.1-8b-instruct-fast",
     "AI_DAILY_CALL_LIMIT": "50",
     "SOURCE_BATCH_SIZE": "10",
     "PUBLIC_BASE_URL": "https://ai-radar.mzer8-substracker.workers.dev"
