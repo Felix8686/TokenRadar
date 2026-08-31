@@ -13,7 +13,7 @@
     {
       "binding": "DB",
       "database_name": "ai-radar-db",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "5bab76fa-866a-49dc-839e-febb583a71df",
       "migrations_dir": "migrations"
     }
   ],
@@ -29,9 +29,10 @@
   "vars": {
     "APP_NAME": "AI-Radar",
     "APP_TIMEZONE": "Asia/Shanghai",
-    "AI_ENABLED": "false",
+    "AI_ENABLED": "true",
     "AI_MODEL": "@cf/meta/llama-3.1-8b-instruct",
+    "AI_DAILY_CALL_LIMIT": "50",
     "SOURCE_BATCH_SIZE": "10",
-    "PUBLIC_BASE_URL": ""
+    "PUBLIC_BASE_URL": "https://ai-radar.mzer8-substracker.workers.dev"
   }
 }

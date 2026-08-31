@@ -6,12 +6,16 @@
   "scripts": {
     "dev": "wrangler dev --test-scheduled",
     "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test && wrangler deploy --dry-run",
     "types": "wrangler types",
     "db:migrate:local": "wrangler d1 migrations apply ai-radar-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply ai-radar-db --remote"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
+    "tsx": "^4.23.13",
     "typescript": "^5.9.2",
     "wrangler": "^4.0.0"
   }

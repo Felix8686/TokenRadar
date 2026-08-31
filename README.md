@@ -27,7 +27,7 @@ The public UI never exposes the internal P1/P2/P3 field. It only affects deliver
 
 ## Zero-cost rule
 
-The default system must not require paid APIs or paid infrastructure. Workers AI is optional and disabled by default. If a source requires a paid API, the collector should degrade or remain unsupported rather than silently incur cost.
+The default system does not require paid APIs or paid infrastructure. Workers AI is enabled only after change detection, source-entry/global deduplication, and deterministic filtering. It is hard-capped at 50 calls per UTC day with at most 256 output tokens per call; quota exhaustion or any AI error falls back to the deterministic result. The current cap is intentionally below the Workers AI free daily allocation.
 
 ## Current collectors
 
@@ -38,7 +38,7 @@ The default system must not require paid APIs or paid infrastructure. Workers AI
 
 ## Cloudflare bindings
 
-The Worker expects `DB` (D1), `AI` (Workers AI), and `ASSETS` (Static Assets). Secrets: `ADMIN_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, optional `TELEGRAM_TOPIC_P1`, optional `TELEGRAM_TOPIC_DAILY`. Set `PUBLIC_BASE_URL` after deployment. Never commit secrets.
+The Worker expects `DB` (D1), `AI` (Workers AI), and `ASSETS` (Workers Static Assets). Secrets: `ADMIN_TOKEN`, the dedicated AI-Radar `TELEGRAM_BOT_TOKEN`, and the dedicated group `TELEGRAM_CHAT_ID`. AI-Radar has no Telegram webhook or inbound command handler: the bot is outbound-only, does not share Hermes credentials, and does not use forum topics. Non-secret safety controls include `AI_DAILY_CALL_LIMIT` and `SOURCE_BATCH_SIZE`. Never commit secret values.
 
 ## Initial setup
 
@@ -49,7 +49,11 @@ The Worker expects `DB` (D1), `AI` (Workers AI), and `ASSETS` (Static Assets). S
 5. Configure secrets with `wrangler secret put ...`.
 6. `npm run deploy`
 
-Cloudflare Cron runs in UTC. `30 4 * * *` equals 12:30 Asia/Shanghai.
+Cloudflare Cron runs in UTC. `30 4 * * *` equals 12:30 Asia/Shanghai. The report window is the preceding 24 hours ending at 12:30 Beijing time.
+
+## Production source seed
+
+The first production migration enables nine sources: DeepSeek, Zhipu BigModel, MiniMax, and Kimi official pricing pages; OpenCode releases; AI Coding Deals, LLM Price Tracker, and Coding Plan CN maintained GitHub collections; and an HN RSS community lead feed. The removed `cheahjs/free-llm-api-resources` repository is retained as a disabled migration record because the upstream URL returns 404.
 
 ## API
 

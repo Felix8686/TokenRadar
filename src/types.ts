@@ -6,12 +6,11 @@ export interface Env {
   APP_TIMEZONE: string;
   AI_ENABLED: string;
   AI_MODEL: string;
+  AI_DAILY_CALL_LIMIT: string;
   SOURCE_BATCH_SIZE: string;
   PUBLIC_BASE_URL: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
-  TELEGRAM_TOPIC_P1?: string;
-  TELEGRAM_TOPIC_DAILY?: string;
   ADMIN_TOKEN?: string;
 }
 
@@ -46,6 +45,6 @@ export interface Classification {
 export interface ItemRow {
   id: number; source_id: number; title: string; summary: string | null; url: string | null;
   kind: ItemKind; priority: Priority; score: number; source_confidence: string; verification_status: string;
-  vendor: string | null; product: string | null; expires_at: string | null; discovered_at: string;
+  vendor: string | null; product: string | null; previous_price: number | null; current_price: number | null; currency: string | null; expires_at: string | null; discovered_at: string;
   published_at: string | null; pushed_at: string | null;
 }

@@ -23,7 +23,26 @@ export async function saveFetchFailure(db: D1Database, source: SourceRow, error:
 }
 
 function canonicalUrl(value: string): string { try { const url = new URL(value); for (const key of [...url.searchParams.keys()]) { if (key.toLowerCase().startsWith('utm_') || ['ref','source','campaign'].includes(key.toLowerCase())) url.searchParams.delete(key); } url.hash=''; return url.toString(); } catch { return value.trim(); } }
-export async function buildFingerprint(_source: SourceRow, candidate: Candidate): Promise<string> { if (candidate.url) return sha256(`url:${canonicalUrl(candidate.url)}`); const title=candidate.title.toLowerCase().replace(/\s+/g,' ').trim(); const summary=(candidate.summary||'').toLowerCase().replace(/\s+/g,' ').trim().slice(0,240); return sha256(`text:${title}|${summary}`); }
+export async function sourceEntryId(candidate: Candidate): Promise<string> { return candidate.externalId || candidate.url || sha256(`${candidate.title}|${candidate.summary || candidate.rawExcerpt || ''}`); }
+export async function buildFingerprint(source: SourceRow, candidate: Candidate): Promise<string> { if (source.type === 'web' && candidate.externalId) return sha256(`web:${source.id}:${candidate.externalId}`); if (candidate.url) return sha256(`url:${canonicalUrl(candidate.url)}`); const title=candidate.title.toLowerCase().replace(/\s+/g,' ').trim(); const summary=(candidate.summary||'').toLowerCase().replace(/\s+/g,' ').trim().slice(0,240); return sha256(`text:${title}|${summary}`); }
+export async function rememberSourceEntry(db:D1Database,source:SourceRow,candidate:Candidate):Promise<void>{const externalId=await sourceEntryId(candidate);await db.prepare('INSERT OR IGNORE INTO source_entries(source_id,external_id) VALUES(?1,?2)').bind(source.id,externalId).run();}
+export async function rememberSourceEntries(db:D1Database,source:SourceRow,candidates:Candidate[]):Promise<void>{if(!candidates.length)return;const statements=[];for(const candidate of candidates){const externalId=await sourceEntryId(candidate);statements.push(db.prepare('INSERT OR IGNORE INTO source_entries(source_id,external_id) VALUES(?1,?2)').bind(source.id,externalId));}await db.batch(statements);}
+export async function filterNewCandidates(db:D1Database,source:SourceRow,candidates:Candidate[]):Promise<Candidate[]>{
+  if(!candidates.length)return[];
+  const entryIds=await Promise.all(candidates.map(sourceEntryId));
+  const entryPlaceholders=entryIds.map((_,index)=>`?${index+2}`).join(',');
+  const seenRows=await db.prepare(`SELECT external_id FROM source_entries WHERE source_id=?1 AND external_id IN (${entryPlaceholders})`).bind(source.id,...entryIds).all<{external_id:string}>();
+  const seen=new Set((seenRows.results||[]).map(row=>row.external_id));
+  const unseen=candidates.filter((_,index)=>!seen.has(entryIds[index]));
+  if(!unseen.length)return[];
+  const fingerprints=await Promise.all(unseen.map(candidate=>buildFingerprint(source,candidate)));
+  const fingerprintPlaceholders=fingerprints.map((_,index)=>`?${index+1}`).join(',');
+  const duplicateRows=await db.prepare(`SELECT fingerprint FROM items WHERE fingerprint IN (${fingerprintPlaceholders})`).bind(...fingerprints).all<{fingerprint:string}>();
+  const duplicates=new Set((duplicateRows.results||[]).map(row=>row.fingerprint));
+  const crossSourceDuplicates=unseen.filter((_,index)=>duplicates.has(fingerprints[index]));
+  await rememberSourceEntries(db,source,crossSourceDuplicates);
+  return unseen.filter((_,index)=>!duplicates.has(fingerprints[index]));
+}
 
 export async function insertItem(db: D1Database, source: SourceRow, candidate: Candidate, c: Classification): Promise<{ inserted: boolean; id?: number }> {
   const fingerprint = await buildFingerprint(source,candidate);
@@ -31,5 +50,5 @@ export async function insertItem(db: D1Database, source: SourceRow, candidate: C
   if (!result.meta.changes) return { inserted:false }; const row = await db.prepare('SELECT id FROM items WHERE fingerprint=?1').bind(fingerprint).first<{id:number}>(); return { inserted:true,id:row?.id };
 }
 export async function markPushed(db: D1Database,id:number):Promise<void>{await db.prepare('UPDATE items SET pushed_at=?1 WHERE id=?2').bind(isoNow(),id).run();}
-export async function getRecentItems(db:D1Database,limit=100):Promise<(ItemRow&{source_name:string})[]>{const r=await db.prepare(`SELECT i.*,s.name AS source_name FROM items i JOIN sources s ON s.id=i.source_id ORDER BY i.discovered_at DESC LIMIT ?1`).bind(limit).all<ItemRow&{source_name:string}>();return r.results||[];}
-export async function getReportItems(db:D1Database,start:string,end:string):Promise<(ItemRow&{source_name:string})[]>{const r=await db.prepare(`SELECT i.*,s.name AS source_name FROM items i JOIN sources s ON s.id=i.source_id WHERE i.discovered_at>=?1 AND i.discovered_at<?2 AND i.priority IN ('P2','P3') ORDER BY CASE i.priority WHEN 'P2' THEN 1 ELSE 2 END,i.score DESC,i.discovered_at DESC`).bind(start,end).all<ItemRow&{source_name:string}>();return r.results||[];}
+export async function getRecentItems(db:D1Database,limit=100):Promise<(ItemRow&{source_name:string;last_verified_at:string|null})[]>{const r=await db.prepare(`SELECT i.*,s.name AS source_name,s.last_success_at AS last_verified_at FROM items i JOIN sources s ON s.id=i.source_id ORDER BY i.discovered_at DESC LIMIT ?1`).bind(limit).all<ItemRow&{source_name:string;last_verified_at:string|null}>();return r.results||[];}
+export async function getReportItems(db:D1Database,start:string,end:string):Promise<(ItemRow&{source_name:string;last_verified_at:string|null})[]>{const r=await db.prepare(`SELECT i.*,s.name AS source_name,s.last_success_at AS last_verified_at FROM items i JOIN sources s ON s.id=i.source_id WHERE i.discovered_at>=?1 AND i.discovered_at<?2 AND i.priority IN ('P2','P3') ORDER BY CASE i.priority WHEN 'P2' THEN 1 ELSE 2 END,i.score DESC,i.discovered_at DESC`).bind(start,end).all<ItemRow&{source_name:string;last_verified_at:string|null}>();return r.results||[];}

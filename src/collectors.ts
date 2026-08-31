@@ -47,8 +47,11 @@ async function collectFeed(source: SourceRow, feedUrl = source.url): Promise<Col
 async function collectWeb(source: SourceRow): Promise<CollectResult> {
   const { response, text } = await fetchText(source, source.url, 'text/html, text/plain;q=0.9, */*;q=0.8');
   if (response.status === 304) return { statusCode: 304, notModified: true, candidates: [] };
-  const body = text || ''; const normalized = stripHtml(body); const excerpt = normalized.length <= 1800 ? normalized : `${normalized.slice(0, 1800)}…`;
-  return { statusCode: response.status, notModified: false, etag: response.headers.get('etag') || undefined, lastModified: response.headers.get('last-modified') || undefined, contentHash: await sha256(normalized), candidates: [{ externalId: await sha256(`${source.url}:${excerpt}`), title: `${source.name} changed`, summary: excerpt, rawExcerpt: excerpt, url: source.url }] };
+  const body = text || '';
+  const normalized = stripHtml(body);
+  const contentHash = await sha256(normalized);
+  const excerpt = normalized.length <= 1800 ? normalized : `${normalized.slice(0, 1800)}…`;
+  return { statusCode: response.status, notModified: false, etag: response.headers.get('etag') || undefined, lastModified: response.headers.get('last-modified') || undefined, contentHash, candidates: [{ externalId: contentHash, title: `${source.name} changed`, summary: excerpt, rawExcerpt: excerpt, url: source.url }] };
 }
 
 async function collectGitHub(source: SourceRow): Promise<CollectResult> {
