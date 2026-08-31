@@ -47,9 +47,11 @@ export async function maybeEnrichWithAi(env: Env, source: SourceRow, candidate: 
   try {
     const result = await env.AI.run(env.AI_MODEL, { prompt, max_tokens: 256 });
     const raw = typeof result === 'string' ? result : result && typeof result === 'object' && 'response' in result && typeof result.response === 'string' ? result.response : JSON.stringify(result); const match = raw.match(/\{[\s\S]*\}/); if (!match) return base;
-    const parsed = JSON.parse(match[0]) as AiJson; const score = Number.isFinite(parsed.score) ? Math.max(0, Math.min(100, Number(parsed.score))) : base.score;
+    const parsed = JSON.parse(match[0]) as AiJson;
+    const aiScore = Number.isFinite(parsed.score) ? Math.max(0, Math.min(100, Number(parsed.score))) : base.score;
+    const score = base.priority === 'P1' ? Math.max(base.score, aiScore) : aiScore;
     const kind = parsed.kind && AI_KINDS.has(parsed.kind) ? parsed.kind : base.kind;
     const summaryZh = typeof parsed.summaryZh === 'string' ? parsed.summaryZh.replace(/\s+/g, ' ').trim().slice(0, 180) : base.summaryZh;
-    return { ...base, kind, score, priority: score >= 75 ? 'P1' : score >= 40 ? 'P2' : 'P3', vendor: parsed.vendor || base.vendor, product: parsed.product || base.product, expiresAt: parsed.expiresAt || base.expiresAt, previousPrice: parsed.previousPrice ?? base.previousPrice, currentPrice: parsed.currentPrice ?? base.currentPrice, currency: parsed.currency || base.currency, summaryZh, aiEnriched: true };
+    return { ...base, kind, score, priority: base.priority === 'P1' ? 'P1' : score >= 75 ? 'P1' : score >= 40 ? 'P2' : 'P3', vendor: parsed.vendor || base.vendor, product: parsed.product || base.product, expiresAt: parsed.expiresAt || base.expiresAt, previousPrice: parsed.previousPrice ?? base.previousPrice, currentPrice: parsed.currentPrice ?? base.currentPrice, currency: parsed.currency || base.currency, summaryZh, aiEnriched: true };
   } catch { return base; }
 }
