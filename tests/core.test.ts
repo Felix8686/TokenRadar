@@ -5,7 +5,7 @@ import { beijingWindow, renderReport } from '../src/daily';
 import { buildFingerprint } from '../src/db';
 import { toPublicItem } from '../src/index';
 import { classifyDeterministically, maybeEnrichWithAi } from '../src/rules';
-import { pushDailyReport, pushP1 } from '../src/telegram';
+import { buildChineseSummary, pushDailyReport, pushP1 } from '../src/telegram';
 import type { Env, ItemRow, SourceRow } from '../src/types';
 
 const source = (type: SourceRow['type']): SourceRow => ({
@@ -117,7 +117,7 @@ test('RSS, GitHub Atom, and web collectors recognize new content', async () => {
   }
 });
 
-test('Workers AI response is parsed and quota exhaustion falls back to rules', async () => {
+test('Workers AI response includes a concise Chinese summary and quota exhaustion falls back to rules', async () => {
   const candidate = { title: 'New coding plan', summary: 'A new plan launch', url: 'https://example.com/plan' };
   const base = classifyDeterministically(source('web'), candidate);
   let aiCalls = 0;
@@ -126,11 +126,12 @@ test('Workers AI response is parsed and quota exhaustion falls back to rules', a
     AI_MODEL: '@cf/meta/llama-3.1-8b-instruct',
     AI_DAILY_CALL_LIMIT: '50',
     DB: { prepare: () => ({ bind: () => ({ first: async () => ({ calls: 1 }) }) }) },
-    AI: { run: async () => { aiCalls += 1; return { response: '{"kind":"price_drop","score":80,"vendor":"Example"}' }; } },
+    AI: { run: async () => { aiCalls += 1; return { response: '{"kind":"price_drop","score":80,"vendor":"Example","summaryZh":"Example Coding Plan 已降价，具体价格和适用范围请查看官方页面。"}' }; } },
   } as unknown as Env;
   const enriched = await maybeEnrichWithAi(env, source('web'), candidate, base);
   assert.equal(enriched.kind, 'price_drop');
   assert.equal(enriched.priority, 'P1');
+  assert.equal(enriched.summaryZh, 'Example Coding Plan 已降价，具体价格和适用范围请查看官方页面。');
   assert.equal(enriched.aiEnriched, true);
   assert.equal(aiCalls, 1);
 
@@ -141,6 +142,12 @@ test('Workers AI response is parsed and quota exhaustion falls back to rules', a
   const fallback = await maybeEnrichWithAi(exhausted, source('web'), candidate, base);
   assert.deepEqual(fallback, base);
   assert.equal(aiCalls, 1, 'AI must not run after the daily quota is exhausted');
+});
+
+test('P1 fallback still produces Chinese summary when Workers AI is unavailable', () => {
+  const summary = buildChineseSummary(Object.assign({}, item, { kind: 'free_credit' }));
+  assert.match(summary, /免费额度/);
+  assert.match(summary, /Example Vendor Example API/);
 });
 
 test('Telegram is outbound-only and sends P1/daily to one chat without topics', async () => {
@@ -156,7 +163,7 @@ test('Telegram is outbound-only and sends P1/daily to one chat without topics', 
       TELEGRAM_CHAT_ID: '-1001234567890',
       PUBLIC_BASE_URL: 'https://ai-radar.example',
     } as unknown as Env;
-    assert.equal(await pushP1(env, Object.assign({}, item, { source_name: 'Official pricing' })), true);
+    assert.equal(await pushP1(env, Object.assign({}, item, { source_name: 'Official pricing' }), '这是中文摘要测试。'), true);
     assert.equal(await pushDailyReport(env, '2026-08-31', { p2: 2, p3: 3 }), true);
     assert.equal(payloads.length, 2);
     for (const payload of payloads) {
@@ -164,6 +171,9 @@ test('Telegram is outbound-only and sends P1/daily to one chat without topics', 
       assert.equal('message_thread_id' in payload, false);
     }
     assert.match(String(payloads[0].text), /🔥 <b>高价值优惠<\/b>/);
+    assert.match(String(payloads[0].text), /📝 <b>中文摘要<\/b>/);
+    assert.match(String(payloads[0].text), /这是中文摘要测试/);
+    assert.doesNotMatch(String(payloads[0].text), /Free API credit for developers/);
     assert.match(String(payloads[1].text), /📋 <b>AI 优惠雷达日报 · 2026-08-31<\/b>/);
   } finally {
     globalThis.fetch = originalFetch;

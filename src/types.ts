@@ -36,7 +36,7 @@ export interface CollectResult {
 
 export interface Classification {
   kind: ItemKind; priority: Priority; score: number; vendor?: string; product?: string; expiresAt?: string;
-  previousPrice?: number; currentPrice?: number; currency?: string;
+  previousPrice?: number; currentPrice?: number; currency?: string; summaryZh?: string;
   sourceConfidence: 'high' | 'medium' | 'low';
   verificationStatus: 'official_confirmed' | 'cross_verified' | 'unverified' | 'disputed';
   aiEnriched: boolean;

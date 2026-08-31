@@ -26,19 +26,30 @@ export function classifyDeterministically(source: SourceRow, candidate: Candidat
   return { kind, priority: score >= 75 ? 'P1' : score >= 40 ? 'P2' : 'P3', score, sourceConfidence: confidenceForTrust(source.trust_level), verificationStatus: verificationForTrust(source.trust_level), aiEnriched: false };
 }
 
-interface AiJson { kind?: Classification['kind']; score?: number; vendor?: string; product?: string; expiresAt?: string; previousPrice?: number; currentPrice?: number; currency?: string; }
+interface AiJson { kind?: Classification['kind']; score?: number; vendor?: string; product?: string; expiresAt?: string; previousPrice?: number; currentPrice?: number; currency?: string; summaryZh?: string; }
 const AI_KINDS = new Set<Classification['kind']>(['free_credit','limited_offer','price_drop','price_change','new_plan','other']);
 async function reserveAiCall(env:Env):Promise<boolean>{const limit=Math.max(0,Math.min(50,Number(env.AI_DAILY_CALL_LIMIT||50)));if(limit===0)return false;const usageDate=new Date().toISOString().slice(0,10);const row=await env.DB.prepare(`INSERT INTO ai_daily_usage(usage_date,calls,updated_at) VALUES(?1,1,CURRENT_TIMESTAMP) ON CONFLICT(usage_date) DO UPDATE SET calls=calls+1,updated_at=CURRENT_TIMESTAMP WHERE calls<?2 RETURNING calls`).bind(usageDate,limit).first<{calls:number}>();return Boolean(row);}
 export async function maybeEnrichWithAi(env: Env, source: SourceRow, candidate: Candidate, base: Classification): Promise<Classification> {
   if (env.AI_ENABLED !== 'true' || !env.AI) return base;
-  if (base.priority === 'P1' || base.score < 25) return base;
+  if (base.score < 25) return base;
   try { if (!await reserveAiCall(env)) return base; } catch { return base; }
-  const prompt = ['You are a strict classifier for AI developer pricing/deal intelligence.','Return JSON only. Do not invent missing facts.','Allowed kind: free_credit, limited_offer, price_drop, price_change, new_plan, other.','score is 0-100 and reflects practical value/urgency, not source popularity.',`Source trust: ${source.trust_level}`,`Title: ${candidate.title}`,`Text: ${(candidate.summary || candidate.rawExcerpt || '').slice(0, 2500)}`,'JSON keys: kind, score, vendor, product, expiresAt, previousPrice, currentPrice, currency.'].join('\n');
+  const prompt = [
+    'You are a strict classifier for AI developer pricing/deal intelligence.',
+    'Return JSON only. Do not invent missing facts.',
+    'Allowed kind: free_credit, limited_offer, price_drop, price_change, new_plan, other.',
+    'score is 0-100 and reflects practical value/urgency, not source popularity.',
+    'summaryZh must be 1-2 concise Simplified Chinese sentences, no Markdown, at most 100 Chinese characters. Explain the actual offer/change and important conditions if known. Ignore navigation menus, documentation indexes, boilerplate and unrelated page text.',
+    `Source trust: ${source.trust_level}`,
+    `Title: ${candidate.title}`,
+    `Text: ${(candidate.summary || candidate.rawExcerpt || '').slice(0, 2500)}`,
+    'JSON keys: kind, score, vendor, product, expiresAt, previousPrice, currentPrice, currency, summaryZh.'
+  ].join('\n');
   try {
     const result = await env.AI.run(env.AI_MODEL, { prompt, max_tokens: 256 });
     const raw = typeof result === 'string' ? result : result && typeof result === 'object' && 'response' in result && typeof result.response === 'string' ? result.response : JSON.stringify(result); const match = raw.match(/\{[\s\S]*\}/); if (!match) return base;
     const parsed = JSON.parse(match[0]) as AiJson; const score = Number.isFinite(parsed.score) ? Math.max(0, Math.min(100, Number(parsed.score))) : base.score;
     const kind = parsed.kind && AI_KINDS.has(parsed.kind) ? parsed.kind : base.kind;
-    return { ...base, kind, score, priority: score >= 75 ? 'P1' : score >= 40 ? 'P2' : 'P3', vendor: parsed.vendor || base.vendor, product: parsed.product || base.product, expiresAt: parsed.expiresAt || base.expiresAt, previousPrice: parsed.previousPrice ?? base.previousPrice, currentPrice: parsed.currentPrice ?? base.currentPrice, currency: parsed.currency || base.currency, aiEnriched: true };
+    const summaryZh = typeof parsed.summaryZh === 'string' ? parsed.summaryZh.replace(/\s+/g, ' ').trim().slice(0, 180) : base.summaryZh;
+    return { ...base, kind, score, priority: score >= 75 ? 'P1' : score >= 40 ? 'P2' : 'P3', vendor: parsed.vendor || base.vendor, product: parsed.product || base.product, expiresAt: parsed.expiresAt || base.expiresAt, previousPrice: parsed.previousPrice ?? base.previousPrice, currentPrice: parsed.currentPrice ?? base.currentPrice, currency: parsed.currency || base.currency, summaryZh, aiEnriched: true };
   } catch { return base; }
 }
