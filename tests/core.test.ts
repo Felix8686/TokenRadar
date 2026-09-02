@@ -72,6 +72,24 @@ test('feed fingerprints still deduplicate the same canonical URL', async () => {
   assert.equal(first, second);
 });
 
+test('model discovery fingerprints are event-aware', async () => {
+  const newModel = await buildFingerprint(source('web'), { title: 'Quasar', signalKind: 'new_model', vendorHint: 'Multiverse', productHint: 'Quasar 438B' });
+  const api = await buildFingerprint(source('web'), { title: 'Quasar API', signalKind: 'model_api_available', vendorHint: 'Multiverse', productHint: 'Quasar 438B' });
+  assert.notEqual(newModel, api);
+});
+
+test('new models are never filtered to P3 and new coding models with API can become P1', () => {
+  const discoverySource = Object.assign(source('web'), { trust_level: 'B' as const });
+  const discovered = classifyDeterministically(discoverySource, { title: 'Quasar 438B', signalKind: 'new_model', productHint: 'Quasar 438B' });
+  assert.equal(discovered.kind, 'new_model');
+  assert.equal(discovered.priority, 'P2');
+  assert.ok(discovered.score >= 40);
+
+  const official = classifyDeterministically(source('web'), { title: 'Introducing a new coding model', summary: 'The new model is available through our API for coding agents.' });
+  assert.equal(official.kind, 'new_model');
+  assert.equal(official.priority, 'P1');
+});
+
 test('public item projection exposes only user-facing fields', () => {
   const publicItem = toPublicItem(Object.assign({}, item, { raw_excerpt: 'internal', ai_enriched: 1 }));
   assert.equal(publicItem.title, item.title);
@@ -81,14 +99,17 @@ test('public item projection exposes only user-facing fields', () => {
 });
 
 test('daily HTML uses public categories and never renders internal priorities', () => {
-  const html = renderReport('2026-08-31', [item]);
+  const modelItem = Object.assign({}, item, { id: 2, kind: 'new_model' as const, title: 'Quasar 438B', priority: 'P2' as const });
+  const html = renderReport('2026-08-31', [item, modelItem]);
   assert.match(html, /免费额度/);
+  assert.match(html, /新模型与 API/);
+  assert.match(html, /Quasar 438B/);
   assert.match(html, /Example Vendor/);
   assert.match(html, /最后核验/);
   assert.doesNotMatch(html, /\bP[123]\b/);
 });
 
-test('RSS, GitHub Atom, and web collectors recognize new content', async () => {
+test('RSS, GitHub Atom, web, and model discovery collectors recognize new content', async () => {
   const originalFetch = globalThis.fetch;
   try {
     globalThis.fetch = async () => new Response(`<?xml version="1.0"?><rss><channel><item><guid>deal-2</guid><title>New free credits</title><link>https://example.com/deal-2</link><description>New AI API credits</description><pubDate>Mon, 31 Aug 2026 03:00:00 GMT</pubDate></item></channel></rss>`, { status: 200, headers: { etag: '"rss-v2"' } });
@@ -112,6 +133,18 @@ test('RSS, GitHub Atom, and web collectors recognize new content', async () => {
     const webAfter = await collectSource(source('web'));
     assert.notEqual(webBefore.contentHash, webAfter.contentHash);
     assert.notEqual(webBefore.candidates[0]?.externalId, webAfter.candidates[0]?.externalId);
+
+    const openRouterSource = Object.assign(source('web'), { url: 'https://openrouter.ai/api/v1/models', config_json: JSON.stringify({ discoveryProvider: 'openrouter_models' }) });
+    globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'multiverse/quasar-438b', name: 'Quasar 438B', created: 1788360000, context_length: 131072, pricing: { prompt: '0.000001', completion: '0.000003' } }] }), { status: 200 });
+    const openRouter = await collectSource(openRouterSource);
+    assert.equal(openRouter.candidates[0]?.signalKind, 'model_api_available');
+    assert.equal(openRouter.candidates[0]?.productHint, 'Quasar 438B');
+
+    const aaSource = Object.assign(source('web'), { url: 'https://artificialanalysis.ai/models', config_json: JSON.stringify({ discoveryProvider: 'artificial_analysis_models' }) });
+    globalThis.fetch = async () => new Response('<html><body><a href="/models/quasar-438b"><span>Quasar 438B</span></a></body></html>', { status: 200 });
+    const aa = await collectSource(aaSource);
+    assert.equal(aa.candidates[0]?.externalId, 'artificial-analysis:quasar-438b');
+    assert.equal(aa.candidates[0]?.signalKind, 'new_model');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -170,11 +203,11 @@ test('Telegram is outbound-only and sends P1/daily to one chat without topics', 
       assert.equal(payload.chat_id, '-1001234567890');
       assert.equal('message_thread_id' in payload, false);
     }
-    assert.match(String(payloads[0].text), /🔥 <b>高价值优惠<\/b>/);
+    assert.match(String(payloads[0].text), /🔥 <b>高价值情报<\/b>/);
     assert.match(String(payloads[0].text), /📝 <b>中文摘要<\/b>/);
     assert.match(String(payloads[0].text), /这是中文摘要测试/);
     assert.doesNotMatch(String(payloads[0].text), /Free API credit for developers/);
-    assert.match(String(payloads[1].text), /📋 <b>AI 优惠雷达日报 · 2026-08-31<\/b>/);
+    assert.match(String(payloads[1].text), /📋 <b>AI-Radar 日报 · 2026-08-31<\/b>/);
   } finally {
     globalThis.fetch = originalFetch;
   }
