@@ -1,8 +1,15 @@
-import type { Candidate, Classification, ItemRow, SourceRow } from './types';
+import type { Candidate, Classification, ItemRow, SourceRow, SourceTier } from './types';
 import { addMinutesIso, isoNow, sha256 } from './utils';
 
+const DISCOVERY_KINDS = new Set<Classification['kind']>(['new_model','model_api_available','model_open_source','model_benchmark']);
+
+export async function expireTemporarySources(db:D1Database):Promise<void>{
+  await db.prepare(`UPDATE sources SET enabled=0,status='expired',updated_at=?1 WHERE enabled=1 AND source_tier IN ('temporary','candidate') AND expires_at IS NOT NULL AND expires_at<=?1`).bind(isoNow()).run();
+}
+
 export async function getDueSources(db: D1Database, limit: number): Promise<SourceRow[]> {
-  const result = await db.prepare(`SELECT * FROM sources WHERE enabled = 1 AND (next_fetch_at IS NULL OR next_fetch_at <= ?1) ORDER BY COALESCE(next_fetch_at, created_at) ASC LIMIT ?2`).bind(isoNow(), limit).all<SourceRow>();
+  const now=isoNow();
+  const result = await db.prepare(`SELECT * FROM sources WHERE enabled = 1 AND (source_tier NOT IN ('temporary','candidate') OR expires_at IS NULL OR expires_at > ?1) AND (next_fetch_at IS NULL OR next_fetch_at <= ?1) ORDER BY COALESCE(next_fetch_at, created_at) ASC LIMIT ?2`).bind(now, limit).all<SourceRow>();
   return result.results || [];
 }
 
@@ -23,8 +30,14 @@ export async function saveFetchFailure(db: D1Database, source: SourceRow, error:
 }
 
 function canonicalUrl(value: string): string { try { const url = new URL(value); for (const key of [...url.searchParams.keys()]) { if (key.toLowerCase().startsWith('utm_') || ['ref','source','campaign'].includes(key.toLowerCase())) url.searchParams.delete(key); } url.hash=''; return url.toString(); } catch { return value.trim(); } }
+function normalizedModelKey(value:string|undefined):string{return (value||'').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g,' ').trim();}
 export async function sourceEntryId(candidate: Candidate): Promise<string> { return candidate.externalId || candidate.url || sha256(`${candidate.title}|${candidate.summary || candidate.rawExcerpt || ''}`); }
-export async function buildFingerprint(source: SourceRow, candidate: Candidate): Promise<string> { if (source.type === 'web' && candidate.externalId) return sha256(`web:${source.id}:${candidate.externalId}`); if (candidate.url) return sha256(`url:${canonicalUrl(candidate.url)}`); const title=candidate.title.toLowerCase().replace(/\s+/g,' ').trim(); const summary=(candidate.summary||'').toLowerCase().replace(/\s+/g,' ').trim().slice(0,240); return sha256(`text:${title}|${summary}`); }
+export async function buildFingerprint(source: SourceRow, candidate: Candidate): Promise<string> {
+  if(candidate.signalKind&&candidate.productHint){const vendor=normalizedModelKey(candidate.vendorHint);const product=normalizedModelKey(candidate.productHint);return sha256(`model:${candidate.signalKind}:${vendor}:${product}`);}
+  if (source.type === 'web' && candidate.externalId) return sha256(`web:${source.id}:${candidate.externalId}`);
+  if (candidate.url) return sha256(`url:${canonicalUrl(candidate.url)}`);
+  const title=candidate.title.toLowerCase().replace(/\s+/g,' ').trim(); const summary=(candidate.summary||'').toLowerCase().replace(/\s+/g,' ').trim().slice(0,240); return sha256(`text:${title}|${summary}`);
+}
 export async function rememberSourceEntry(db:D1Database,source:SourceRow,candidate:Candidate):Promise<void>{const externalId=await sourceEntryId(candidate);await db.prepare('INSERT OR IGNORE INTO source_entries(source_id,external_id) VALUES(?1,?2)').bind(source.id,externalId).run();}
 export async function rememberSourceEntries(db:D1Database,source:SourceRow,candidates:Candidate[]):Promise<void>{if(!candidates.length)return;const statements=[];for(const candidate of candidates){const externalId=await sourceEntryId(candidate);statements.push(db.prepare('INSERT OR IGNORE INTO source_entries(source_id,external_id) VALUES(?1,?2)').bind(source.id,externalId));}await db.batch(statements);}
 export async function filterNewCandidates(db:D1Database,source:SourceRow,candidates:Candidate[]):Promise<Candidate[]>{
@@ -42,6 +55,34 @@ export async function filterNewCandidates(db:D1Database,source:SourceRow,candida
   const crossSourceDuplicates=unseen.filter((_,index)=>duplicates.has(fingerprints[index]));
   await rememberSourceEntries(db,source,crossSourceDuplicates);
   return unseen.filter((_,index)=>!duplicates.has(fingerprints[index]));
+}
+
+export async function registerDiscoveredSource(db:D1Database,source:SourceRow,candidate:Candidate,c:Classification):Promise<boolean>{
+  if(source.source_tier!=='discovery'||!DISCOVERY_KINDS.has(c.kind)||c.priority==='P3'||!candidate.url)return false;
+  let url:string;
+  try{const parsed=new URL(candidate.url);if(!['http:','https:'].includes(parsed.protocol))return false;parsed.hash='';url=parsed.toString();}catch{return false;}
+  if(canonicalUrl(url)===canonicalUrl(source.url))return false;
+  const existing=await db.prepare(`SELECT id,source_tier FROM sources WHERE url=?1 LIMIT 1`).bind(url).first<{id:number;source_tier:SourceTier}>();
+  const expiresAt=new Date(Date.now()+30*24*60*60*1000).toISOString();
+  if(existing){
+    if(existing.source_tier==='temporary'||existing.source_tier==='candidate')await db.prepare(`UPDATE sources SET enabled=1,expires_at=CASE WHEN expires_at IS NULL OR expires_at<?2 THEN ?2 ELSE expires_at END,updated_at=?3 WHERE id=?1`).bind(existing.id,expiresAt,isoNow()).run();
+    return false;
+  }
+  const count=await db.prepare(`SELECT COUNT(*) AS count FROM sources WHERE enabled=1 AND source_tier IN ('temporary','candidate')`).first<{count:number}>();
+  if((count?.count||0)>=100)return false;
+  const label=(c.product||candidate.productHint||candidate.title).replace(/\s+/g,' ').trim().slice(0,110);
+  const trust=source.trust_level==='A'?'B':source.trust_level==='B'?'B':'C';
+  const config=JSON.stringify({sourceTier:'temporary',discoveredFrom:source.id,discoverySignal:c.kind});
+  await db.prepare(`INSERT INTO sources(name,url,type,trust_level,enabled,interval_minutes,config_json,next_fetch_at,source_tier,discovered_from_source_id,expires_at,hit_count) VALUES(?1,?2,'web',?3,1,360,?4,CURRENT_TIMESTAMP,'temporary',?5,?6,0)`).bind(`${label} watch`,url,trust,config,source.id,expiresAt).run();
+  return true;
+}
+
+export async function noteSourceValue(db:D1Database,source:SourceRow,c:Classification):Promise<void>{
+  if(!['temporary','candidate'].includes(source.source_tier||'')||c.priority==='P3'||c.kind==='other')return;
+  const nextHit=(source.hit_count||0)+1;
+  const nextTier:SourceTier=nextHit>=3?'core':source.source_tier==='temporary'?'candidate':'candidate';
+  const expiresAt=nextTier==='core'?null:new Date(Date.now()+90*24*60*60*1000).toISOString();
+  await db.prepare(`UPDATE sources SET hit_count=hit_count+1,source_tier=?1,expires_at=?2,updated_at=?3 WHERE id=?4`).bind(nextTier,expiresAt,isoNow(),source.id).run();
 }
 
 export async function insertItem(db: D1Database, source: SourceRow, candidate: Candidate, c: Classification): Promise<{ inserted: boolean; id?: number }> {
