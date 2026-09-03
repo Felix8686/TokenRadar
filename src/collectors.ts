@@ -2,7 +2,7 @@ import type { Candidate, CollectResult, SourceConfig, SourceRow } from './types'
 import { parseJson, sha256, stripHtml, textExcerpt } from './utils';
 
 function conditionalHeaders(source: SourceRow): Headers {
-  const headers = new Headers({ 'user-agent': 'AI-Radar/0.2 (+https://github.com/Felix8686/TokenRadar)', accept: '*/*' });
+  const headers = new Headers({ 'user-agent': 'AI-Radar/0.3 (+https://github.com/Felix8686/TokenRadar)', accept: '*/*' });
   if (source.etag) headers.set('if-none-match', source.etag);
   if (source.last_modified) headers.set('if-modified-since', source.last_modified);
   const config = parseJson<SourceConfig>(source.config_json, {});
@@ -236,6 +236,45 @@ async function collectArtificialAnalysisModels(source: SourceRow): Promise<Colle
   };
 }
 
+const LINK_SIGNAL = /\b(?:free|credits?|pricing|price|discount|coupon|promo|api|models?|release|launch|introducing|announcement|open[-\s]?source|benchmark|coding|agent)\b|免费|额度|价格|优惠|折扣|模型|发布|推出|开源|评测|编程|智能体/i;
+const CONTENT_PATH = /\/(?:resources?|blog|news|releases?|models?|api|pricing|docs?|changelog)(?:\/|$)/i;
+
+export function extractLinkedPageCandidates(source: SourceRow, html: string): Candidate[] {
+  let base: URL;
+  try { base = new URL(source.url); } catch { return []; }
+  const ranked = new Map<string, { candidate: Candidate; score: number }>();
+  const regex = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of html.matchAll(regex)) {
+    const href = match[1].trim();
+    if (!href || href.startsWith('#') || /^(?:mailto|javascript|tel):/i.test(href)) continue;
+    let target: URL;
+    try { target = new URL(href, base); } catch { continue; }
+    if (!['http:', 'https:'].includes(target.protocol) || target.origin !== base.origin) continue;
+    target.hash = '';
+    if (target.pathname === base.pathname && target.search === base.search) continue;
+    if (/\.(?:png|jpe?g|gif|svg|webp|css|js|ico|pdf|zip)(?:$|\?)/i.test(target.pathname)) continue;
+    if (/\/(?:login|signin|signup|privacy|terms|contact|about)(?:\/|$)/i.test(target.pathname)) continue;
+    const label = stripHtml(match[2]).replace(/\s+/g, ' ').trim().slice(0, 220);
+    let score = 0;
+    if (LINK_SIGNAL.test(label)) score += 45;
+    if (LINK_SIGNAL.test(`${target.pathname} ${target.search}`)) score += 35;
+    if (CONTENT_PATH.test(target.pathname)) score += 20;
+    if (score < 20) continue;
+    const url = target.toString();
+    const candidate: Candidate = {
+      externalId: `linked:${url}`,
+      title: label || target.pathname.split('/').filter(Boolean).pop() || url,
+      summary: `Linked page observed from ${source.name}`,
+      rawExcerpt: label || undefined,
+      url,
+      observationKind: 'linked_page',
+    };
+    const previous = ranked.get(url);
+    if (!previous || score > previous.score) ranked.set(url, { candidate, score });
+  }
+  return [...ranked.values()].sort((a, b) => b.score - a.score).slice(0, 60).map((entry) => entry.candidate);
+}
+
 async function collectWeb(source: SourceRow): Promise<CollectResult> {
   const config = parseJson<SourceConfig>(source.config_json, {});
   if (config.discoveryProvider === 'openrouter_models') return collectOpenRouterModels(source);
@@ -248,13 +287,21 @@ async function collectWeb(source: SourceRow): Promise<CollectResult> {
   const normalized = sanitizeExcerpt(body) || stripHtml(body).replace(/\s+/g, ' ').trim();
   const contentHash = await sha256(normalized);
   const excerpt = normalized.length <= 1200 ? normalized : `${normalized.slice(0, 1200)}…`;
+  const pageChange: Candidate = {
+    externalId: contentHash,
+    title: `${source.name} changed`,
+    summary: excerpt,
+    rawExcerpt: excerpt,
+    url: source.url,
+    observationKind: 'page_change',
+  };
   return {
     statusCode: response.status,
     notModified: false,
     etag: response.headers.get('etag') || undefined,
     lastModified: response.headers.get('last-modified') || undefined,
     contentHash,
-    candidates: [{ externalId: contentHash, title: `${source.name} changed`, summary: excerpt, rawExcerpt: excerpt, url: source.url }],
+    candidates: [pageChange, ...extractLinkedPageCandidates(source, body)],
   };
 }
 
