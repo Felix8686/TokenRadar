@@ -1,4 +1,4 @@
-import type { Candidate, Classification, ItemRow, SourceRow, SourceTier } from './types';
+import type { Candidate, Classification, ItemRow, SourceRow, SourceTier, VerificationQueueRow } from './types';
 import { addMinutesIso, isoNow, sha256 } from './utils';
 
 const DISCOVERY_KINDS = new Set<Classification['kind']>(['new_model','model_api_available','model_open_source','model_benchmark']);
@@ -11,6 +11,10 @@ export async function getDueSources(db: D1Database, limit: number): Promise<Sour
   const now=isoNow();
   const result = await db.prepare(`SELECT * FROM sources WHERE enabled = 1 AND (source_tier NOT IN ('temporary','candidate') OR expires_at IS NULL OR expires_at > ?1) AND (next_fetch_at IS NULL OR next_fetch_at <= ?1) ORDER BY COALESCE(next_fetch_at, created_at) ASC LIMIT ?2`).bind(now, limit).all<SourceRow>();
   return result.results || [];
+}
+
+export async function getSourceById(db:D1Database,id:number):Promise<SourceRow|null>{
+  return await db.prepare('SELECT * FROM sources WHERE id=?1 LIMIT 1').bind(id).first<SourceRow>();
 }
 
 export async function saveFetchSuccess(db: D1Database, source: SourceRow, state: { etag?: string; lastModified?: string; contentHash?: string; statusCode: number; changed: boolean; durationMs: number }): Promise<void> {
@@ -55,6 +59,50 @@ export async function filterNewCandidates(db:D1Database,source:SourceRow,candida
   const crossSourceDuplicates=unseen.filter((_,index)=>duplicates.has(fingerprints[index]));
   await rememberSourceEntries(db,source,crossSourceDuplicates);
   return unseen.filter((_,index)=>!duplicates.has(fingerprints[index]));
+}
+
+export async function hasLinkBaseline(db:D1Database,sourceId:number):Promise<boolean>{
+  const row=await db.prepare('SELECT source_id FROM source_link_baselines WHERE source_id=?1 LIMIT 1').bind(sourceId).first<{source_id:number}>();
+  return Boolean(row);
+}
+
+export async function markLinkBaseline(db:D1Database,sourceId:number):Promise<void>{
+  await db.prepare('INSERT OR IGNORE INTO source_link_baselines(source_id,initialized_at) VALUES(?1,CURRENT_TIMESTAMP)').bind(sourceId).run();
+}
+
+export async function enqueueVerification(db:D1Database,source:SourceRow,candidate:Candidate,reason:string,signalScore:number):Promise<void>{
+  const externalId=await sourceEntryId(candidate);
+  const now=new Date();
+  const expiresAt=new Date(now.getTime()+72*60*60*1000).toISOString();
+  await db.prepare(`INSERT INTO verification_queue(source_id,external_id,candidate_json,reason,signal_score,status,attempts,first_seen_at,next_check_at,expires_at,updated_at)
+    VALUES(?1,?2,?3,?4,?5,'pending',0,?6,?6,?7,?6)
+    ON CONFLICT(source_id,external_id) DO UPDATE SET candidate_json=excluded.candidate_json,reason=excluded.reason,signal_score=MAX(verification_queue.signal_score,excluded.signal_score),updated_at=excluded.updated_at
+    WHERE verification_queue.status='pending'`)
+    .bind(source.id,externalId,JSON.stringify(candidate),reason,Math.max(0,Math.min(100,signalScore)),now.toISOString(),expiresAt).run();
+}
+
+export async function expireVerificationQueue(db:D1Database):Promise<void>{
+  const now=isoNow();
+  await db.prepare(`UPDATE verification_queue SET status='discarded',updated_at=?1 WHERE status='pending' AND (expires_at<=?1 OR attempts>=3)`).bind(now).run();
+}
+
+export async function getDueVerification(db:D1Database,limit=5):Promise<VerificationQueueRow[]>{
+  await expireVerificationQueue(db);
+  const result=await db.prepare(`SELECT * FROM verification_queue WHERE status='pending' AND next_check_at<=?1 AND expires_at>?1 AND attempts<3 ORDER BY signal_score DESC,first_seen_at ASC LIMIT ?2`).bind(isoNow(),Math.max(1,Math.min(20,limit))).all<VerificationQueueRow>();
+  return result.results||[];
+}
+
+export async function markVerificationRetry(db:D1Database,row:VerificationQueueRow,error?:unknown):Promise<void>{
+  const attempts=row.attempts+1;
+  const expired=attempts>=3||new Date(row.expires_at).getTime()<=Date.now();
+  const nextCheck=new Date(Date.now()+12*60*60*1000).toISOString();
+  const message=error instanceof Error?error.message:error?String(error):null;
+  await db.prepare(`UPDATE verification_queue SET attempts=?1,status=?2,next_check_at=?3,last_checked_at=?4,last_error=?5,updated_at=?4 WHERE id=?6`)
+    .bind(attempts,expired?'discarded':'pending',nextCheck,isoNow(),message?.slice(0,800)||null,row.id).run();
+}
+
+export async function markVerificationResolved(db:D1Database,id:number,itemId:number|null):Promise<void>{
+  await db.prepare(`UPDATE verification_queue SET status='verified',resolved_item_id=?1,last_checked_at=?2,updated_at=?2 WHERE id=?3`).bind(itemId,isoNow(),id).run();
 }
 
 export async function registerDiscoveredSource(db:D1Database,source:SourceRow,candidate:Candidate,c:Classification):Promise<boolean>{

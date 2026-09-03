@@ -1,31 +1,61 @@
-import type { Env, ItemRow, SourceRow, SourceTier } from './types';
+import type { Candidate, Env, ItemRow, SourceRow, SourceTier } from './types';
 import { collectSource } from './collectors';
 import { classifyDeterministically, maybeEnrichWithAi } from './rules';
-import { expireTemporarySources, filterNewCandidates, getDueSources, getRecentItems, insertItem, markPushed, noteSourceValue, registerDiscoveredSource, rememberSourceEntries, rememberSourceEntry, saveFetchFailure, saveFetchSuccess } from './db';
+import { enqueueVerification, expireTemporarySources, filterNewCandidates, getDueSources, getRecentItems, hasLinkBaseline, insertItem, markLinkBaseline, markPushed, noteSourceValue, registerDiscoveredSource, rememberSourceEntries, rememberSourceEntry, saveFetchFailure, saveFetchSuccess } from './db';
 import { generateDailyReport, getDailyReport, getLatestReport } from './daily';
 import { pushP1 } from './telegram';
+import { directP1Allowed, needsVerification, processVerificationQueue, verificationSignalScore } from './verification';
 import { jsonResponse } from './utils';
+
+async function establishLinkBaseline(env:Env,source:SourceRow,candidates:Candidate[]):Promise<Candidate[]>{
+  const links=candidates.filter(candidate=>candidate.observationKind==='linked_page');
+  if(!links.length)return candidates;
+  if(await hasLinkBaseline(env.DB,source.id))return candidates;
+  await rememberSourceEntries(env.DB,source,links);
+  await markLinkBaseline(env.DB,source.id);
+  return candidates.filter(candidate=>candidate.observationKind!=='linked_page');
+}
 
 async function processSource(env:Env,source:SourceRow):Promise<void>{
   const started=Date.now();
   try{
     const result=await collectSource(source);
+    const candidatesForRun=result.notModified?result.candidates:await establishLinkBaseline(env,source,result.candidates);
     const changed=!result.notModified&&Boolean(result.contentHash&&result.contentHash!==source.content_hash);
     const isBootstrap=!source.content_hash;
     if(!result.notModified&&changed){
       if(isBootstrap){
-        await rememberSourceEntries(env.DB,source,result.candidates);
+        await rememberSourceEntries(env.DB,source,candidatesForRun);
       }else{
-        const candidates=await filterNewCandidates(env.DB,source,result.candidates);
+        const candidates=await filterNewCandidates(env.DB,source,candidatesForRun);
+        const hasNewLinkedPage=candidates.some(candidate=>candidate.observationKind==='linked_page');
         for(const candidate of candidates){
           const deterministic=classifyDeterministically(source,candidate);
-          const c=await maybeEnrichWithAi(env,source,candidate,deterministic);
+
+          // If a listing page changed because it contains a newly observed content link,
+          // verify that exact linked page instead of pushing the generic "xxx changed" observation.
+          if(candidate.observationKind==='page_change'&&hasNewLinkedPage){
+            await rememberSourceEntry(env.DB,source,candidate);
+            continue;
+          }
+
+          if(needsVerification(source,candidate,deterministic)){
+            await enqueueVerification(env.DB,source,candidate,candidate.observationKind||deterministic.kind,verificationSignalScore(source,candidate));
+            await rememberSourceEntry(env.DB,source,candidate);
+            continue;
+          }
+
+          // A plain catalog observation is internal low-confidence data. It can be retained as P3,
+          // but it is never allowed to become an immediate high-value alert without verification.
+          const c=deterministic.kind==='discovered_model'
+            ? {...deterministic,score:Math.min(39,deterministic.score),priority:'P3' as const}
+            : await maybeEnrichWithAi(env,source,candidate,deterministic);
           const saved=await insertItem(env.DB,source,candidate,c);
           await rememberSourceEntry(env.DB,source,candidate);
           if(!saved.inserted||!saved.id)continue;
           await registerDiscoveredSource(env.DB,source,candidate,c);
           await noteSourceValue(env.DB,source,c);
-          if(c.priority==='P1'){
+          if(directP1Allowed(candidate,c)){
             const item:ItemRow&{source_name:string}={id:saved.id,source_id:source.id,title:candidate.title,summary:candidate.summary||null,url:candidate.url||null,kind:c.kind,priority:c.priority,score:c.score,source_confidence:c.sourceConfidence,verification_status:c.verificationStatus,vendor:c.vendor||null,product:c.product||null,previous_price:c.previousPrice??null,current_price:c.currentPrice??null,currency:c.currency||null,expires_at:c.expiresAt||null,discovered_at:new Date().toISOString(),published_at:candidate.publishedAt||null,pushed_at:null,source_name:source.name};
             if(await pushP1(env,item,c.summaryZh))await markPushed(env.DB,saved.id);
           }
@@ -37,7 +67,16 @@ async function processSource(env:Env,source:SourceRow):Promise<void>{
     await saveFetchFailure(env.DB,source,error,Date.now()-started);
   }
 }
-async function harvest(env:Env):Promise<{processed:number}>{await expireTemporarySources(env.DB);const limit=Math.max(1,Math.min(50,Number(env.SOURCE_BATCH_SIZE||10)));const sources=await getDueSources(env.DB,limit);for(const source of sources)await processSource(env,source);return{processed:sources.length};}
+
+async function harvest(env:Env):Promise<{processed:number;verificationProcessed:number;verificationVerified:number}>{
+  await expireTemporarySources(env.DB);
+  const limit=Math.max(1,Math.min(50,Number(env.SOURCE_BATCH_SIZE||10)));
+  const sources=await getDueSources(env.DB,limit);
+  for(const source of sources)await processSource(env,source);
+  const verification=await processVerificationQueue(env,5);
+  return{processed:sources.length,verificationProcessed:verification.processed,verificationVerified:verification.verified};
+}
+
 function isAdmin(request:Request,env:Env):boolean{if(!env.ADMIN_TOKEN)return false;return request.headers.get('authorization')===`Bearer ${env.ADMIN_TOKEN}`;}
 export function toPublicItem(row:ItemRow&{source_name:string;last_verified_at:string|null}){return{id:row.id,title:row.title,summary:row.summary,url:row.url,kind:row.kind,vendor:row.vendor,product:row.product,previous_price:row.previous_price,current_price:row.current_price,currency:row.currency,expires_at:row.expires_at,discovered_at:row.discovered_at,published_at:row.published_at,source_name:row.source_name,verification_status:row.verification_status,last_verified_at:row.last_verified_at};}
 async function listSources(env:Env):Promise<Response>{const rows=await env.DB.prepare(`SELECT id,name,url,type,trust_level,enabled,interval_minutes,source_tier,discovered_from_source_id,expires_at,hit_count,next_fetch_at,last_fetch_at,last_success_at,failure_count,status FROM sources ORDER BY id DESC`).all();return jsonResponse(rows.results||[]);}
