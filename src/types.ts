@@ -29,6 +29,7 @@ export type ItemKind =
   | 'model_api_available'
   | 'model_open_source'
   | 'model_benchmark'
+  | 'discovered_model'
   | 'other';
 
 export interface SourceConfig {
@@ -54,7 +55,7 @@ export interface SourceRow {
 
 export interface Candidate {
   externalId?: string; title: string; summary?: string; url?: string; publishedAt?: string; rawExcerpt?: string;
-  signalKind?: Extract<ItemKind, 'new_model' | 'model_api_available' | 'model_open_source' | 'model_benchmark'>;
+  signalKind?: Extract<ItemKind, 'new_model' | 'model_api_available' | 'model_open_source' | 'model_benchmark' | 'discovered_model'>;
   vendorHint?: string; productHint?: string;
 }
 
