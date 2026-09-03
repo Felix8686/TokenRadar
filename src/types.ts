@@ -19,6 +19,8 @@ export type SourceTier = 'core' | 'discovery' | 'temporary' | 'candidate';
 export type DiscoveryProvider = 'openrouter_models' | 'huggingface_models' | 'artificial_analysis_models';
 export type TrustLevel = 'A' | 'B' | 'C' | 'D';
 export type Priority = 'P1' | 'P2' | 'P3';
+export type ObservationKind = 'page_change' | 'linked_page';
+export type VerificationQueueStatus = 'pending' | 'verified' | 'discarded';
 export type ItemKind =
   | 'free_credit'
   | 'limited_offer'
@@ -57,6 +59,7 @@ export interface Candidate {
   externalId?: string; title: string; summary?: string; url?: string; publishedAt?: string; rawExcerpt?: string;
   signalKind?: Extract<ItemKind, 'new_model' | 'model_api_available' | 'model_open_source' | 'model_benchmark' | 'discovered_model'>;
   vendorHint?: string; productHint?: string;
+  observationKind?: ObservationKind;
 }
 
 export interface CollectResult {
@@ -69,6 +72,23 @@ export interface Classification {
   sourceConfidence: 'high' | 'medium' | 'low';
   verificationStatus: 'official_confirmed' | 'cross_verified' | 'unverified' | 'disputed';
   aiEnriched: boolean;
+}
+
+export interface VerificationQueueRow {
+  id: number;
+  source_id: number;
+  external_id: string;
+  candidate_json: string;
+  reason: string;
+  signal_score: number;
+  status: VerificationQueueStatus;
+  attempts: number;
+  first_seen_at: string;
+  next_check_at: string;
+  expires_at: string;
+  last_checked_at: string | null;
+  resolved_item_id: number | null;
+  last_error: string | null;
 }
 
 export interface ItemRow {
