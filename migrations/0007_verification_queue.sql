@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS source_link_baselines (
   FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE
 );
 
+-- Model dates are publication/observation metadata, never offer expiration dates.
+UPDATE items
+SET expires_at = NULL
+WHERE kind IN ('new_model','model_api_available','model_open_source','model_benchmark','discovered_model')
+  AND expires_at IS NOT NULL;
+
 -- Force one full generic-web fetch after deployment so existing links become a baseline
 -- instead of being mistaken for newly discovered links. content_hash is deliberately kept.
 UPDATE sources
