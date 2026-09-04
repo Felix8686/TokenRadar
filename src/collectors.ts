@@ -43,7 +43,13 @@ function safeUnixIso(value: unknown): string | undefined {
 
 function sanitizeExcerpt(raw?: string): string | undefined {
   if (!raw) return undefined;
-  const stripped = stripHtml(raw)
+  const withoutChrome = raw
+    .replace(/<(script|style|nav|header|footer|aside|noscript|svg)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<!--([\s\S]*?)-->/g, ' ');
+  const main = withoutChrome.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
+  const article = withoutChrome.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1];
+  const scoped = main || article || withoutChrome;
+  const stripped = stripHtml(scoped)
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/`[^`]*`/g, ' ')
     .replace(/<(?:system|assistant|user|im_start|im_end)>[\s\S]*?<\/(?:system|assistant|user|im_start|im_end)>/gi, ' ')

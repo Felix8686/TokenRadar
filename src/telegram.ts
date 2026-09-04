@@ -88,7 +88,7 @@ export function buildChineseSummary(item: ItemRow, aiSummary?: string): string {
   if (item.kind === 'discovered_model') {
     return `在信源中观测到模型「${name}」${createdDate ? `（创建/历史时间：${createdDate}）` : ''}，已作为信源发现记录收录，非近期新发布模型。`;
   }
-  return `检测到「${name}」重要更新，已进入 AI-Radar 高优先级队列，详情请查看原文。`;
+  return `检测到「${name}」页面或信源发生变化，当前尚未核实具体变化内容，建议查看原文。`;
 }
 
 export async function pushP1(env: Env, item: ItemRow & { source_name?: string }, summaryZh?: string): Promise<boolean> {
