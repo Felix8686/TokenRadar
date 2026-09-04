@@ -1,7 +1,7 @@
 import type { Env, ItemRow } from './types';
 import { escapeHtml } from './utils';
 import { getReportItems } from './db';
-import { pushDailyReport } from './telegram';
+import { buildChineseSummary, pushDailyReport } from './telegram';
 
 export function beijingWindow(now = new Date()): { reportDate: string; start: string; end: string } {
   const shifted = new Date(now.getTime() + 8 * 60 * 60 * 1000);
@@ -51,7 +51,8 @@ function itemCard(item: ItemRow & { source_name: string; last_verified_at: strin
     `发现：${formatBeijing(item.discovered_at)}`,
     `最后核验：${formatBeijing(item.last_verified_at)}`,
   ].filter(Boolean);
-  return `<article class="card"><div class="meta"><span>${escapeHtml(kindLabel(item.kind))}</span><span>${escapeHtml(status)}</span></div><h3>${escapeHtml(item.title)}</h3>${item.summary ? `<p>${escapeHtml(item.summary.slice(0, 900))}</p>` : ''}<ul>${details.map((value) => `<li>${escapeHtml(value)}</li>`).join('')}</ul><div class="foot"><span>${escapeHtml(item.source_name)}</span>${item.url ? `<a href="${escapeHtml(item.url)}" rel="noopener noreferrer" target="_blank">查看原文</a>` : ''}</div></article>`;
+  const summaryZh = buildChineseSummary(item, item.summary || undefined);
+  return `<article class="card"><div class="meta"><span>${escapeHtml(kindLabel(item.kind))}</span><span>${escapeHtml(status)}</span></div><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(summaryZh.slice(0, 900))}</p><ul>${details.map((value) => `<li>${escapeHtml(value)}</li>`).join('')}</ul><div class="foot"><span>${escapeHtml(item.source_name)}</span>${item.url ? `<a href="${escapeHtml(item.url)}" rel="noopener noreferrer" target="_blank">查看原文</a>` : ''}</div></article>`;
 }
 
 function section(title: string, items: (ItemRow & { source_name: string; last_verified_at: string | null })[], empty: string): string {
