@@ -294,7 +294,7 @@ test('Telegram is outbound-only and sends P1/daily to one chat without topics', 
       TELEGRAM_CHAT_ID: '-1001234567890',
       PUBLIC_BASE_URL: 'https://ai-radar.example',
     } as unknown as Env;
-    assert.equal(await pushP1(env, Object.assign({}, item, { source_name: 'Official pricing' }), '这是中文摘要测试。'), true);
+    assert.equal(await pushP1(env, Object.assign({}, item, { source_name: 'Official pricing' }), 'Example API 提供免费额度，供开发者使用。'), true);
     assert.equal(await pushDailyReport(env, '2026-08-31', { p2: 2, p3: 3 }), true);
     assert.equal(payloads.length, 2);
     for (const payload of payloads) {
@@ -303,7 +303,7 @@ test('Telegram is outbound-only and sends P1/daily to one chat without topics', 
     }
     assert.match(String(payloads[0].text), /🔥 <b>高价值情报<\/b>/);
     assert.match(String(payloads[0].text), /📝 <b>中文摘要<\/b>/);
-    assert.match(String(payloads[0].text), /这是中文摘要测试/);
+    assert.match(String(payloads[0].text), /Example API 提供免费额度/);
     assert.doesNotMatch(String(payloads[0].text), /Free API credit for developers/);
     assert.match(String(payloads[1].text), /📋 <b>AI-Radar 日报 · 2026-08-31<\/b>/);
   } finally {
