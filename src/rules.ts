@@ -1,5 +1,5 @@
-import type { Candidate, Classification, Env, SourceRow } from './types';
-import { buildChineseSummary, isHighQualityChineseSummary } from './telegram';
+import type { Candidate, Classification, Env, ItemRow, SourceRow } from './types';
+import { buildChineseSummary, isGroundedChineseSummary } from './telegram';
 
 const FREE_PATTERNS = [/free\s*(credit|quota|token|api)/i, /免费.{0,8}(额度|token|api|调用|试用)/i, /赠送.{0,8}(额度|token|代金券)/i, /注册送/i, /兑换码/i];
 const LIMITED_PATTERNS = [/限时/i, /首月/i, /折扣/i, /优惠/i, /coupon|promo|promotion|discount|limited[-\s]?time/i, /充值返/i];
@@ -7,7 +7,6 @@ const DROP_PATTERNS = [/降价|下调.{0,8}(价格|定价)|价格.{0,8}下降/i,
 const PRICE_CHANGE_PATTERNS = [/涨价|提价|价格调整|定价调整|pricing update|price change/i];
 const NEW_PLAN_PATTERNS = [/coding\s*plan|token\s*plan|新套餐|新计划|套餐上线|plan launch/i];
 
-// Official / High-trust release semantics
 const OFFICIAL_RELEASE_PATTERNS = [
   /\b(?:introducing|announcing|we\s+release|we\s+are\s+releasing|we're\s+releasing|launching|unveiling)\b.{0,60}\b(?:model|weights?|llm|moe|checkpoint|architecture)\b/i,
   /\b(?:model|weights?|llm|moe)\b.{0,40}\b(?:is\s+now\s+available|now\s+available|has\s+been\s+released|officially\s+released|launched\s+today)\b/i,
@@ -48,7 +47,6 @@ export function isRecentRelease(publishedAt?: string, now = new Date()): boolean
   const pubTime = new Date(publishedAt).getTime();
   if (Number.isNaN(pubTime)) return false;
   const ageMs = now.getTime() - pubTime;
-  // <= 14 days (and not absurdly in future > 2 days)
   return ageMs >= -2 * 24 * 60 * 60 * 1000 && ageMs <= 14 * 24 * 60 * 60 * 1000;
 }
 
@@ -102,7 +100,6 @@ export function classifyDeterministically(source: SourceRow, candidate: Candidat
     }
   }
 
-  // Strict check on new_model classification
   if (kind === 'new_model') {
     const hasRecentDate = isRecentRelease(candidate.publishedAt, now);
     const hasOfficialReleaseWording = source.trust_level === 'A' && matchesAny(text, OFFICIAL_RELEASE_PATTERNS);
@@ -130,8 +127,6 @@ export function classifyDeterministically(source: SourceRow, candidate: Candidat
   if (/绑卡|credit card required|付费后赠|充值后赠/i.test(text)) score -= 15;
   if (/仅限.{0,12}(美国|us|新加坡|日本|地区)|region[-\s]?locked/i.test(text)) score -= 10;
 
-  // Floor rules: verified new_model / API availability gets at least P2 (40).
-  // discovered_model (without verified recent release) has no forced high floor.
   if (kind === 'new_model' || kind === 'model_api_available' || kind === 'model_open_source') {
     score = Math.max(score, 40);
   }
@@ -188,6 +183,85 @@ async function reserveAiCall(env: Env): Promise<boolean> {
   return Boolean(row);
 }
 
+function parseAiJson(result: unknown): AiJson | undefined {
+  const raw =
+    typeof result === 'string'
+      ? result
+      : result && typeof result === 'object' && 'response' in result && typeof result.response === 'string'
+      ? result.response
+      : JSON.stringify(result);
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return undefined;
+  try {
+    return JSON.parse(match[0]) as AiJson;
+  } catch {
+    return undefined;
+  }
+}
+
+function summaryItem(
+  source: SourceRow,
+  candidate: Candidate,
+  base: Classification,
+  parsed: AiJson,
+  kind: Classification['kind'],
+  score: number,
+  expiresAt?: string
+): ItemRow {
+  return {
+    id: 0,
+    source_id: source.id,
+    title: candidate.title,
+    summary: candidate.summary || candidate.rawExcerpt || null,
+    url: candidate.url || null,
+    kind,
+    priority: base.priority,
+    score,
+    source_confidence: base.sourceConfidence,
+    verification_status: base.verificationStatus,
+    vendor: parsed.vendor || base.vendor || null,
+    product: parsed.product || base.product || null,
+    previous_price: parsed.previousPrice ?? base.previousPrice ?? null,
+    current_price: parsed.currentPrice ?? base.currentPrice ?? null,
+    currency: parsed.currency || base.currency || null,
+    expires_at: expiresAt || null,
+    discovered_at: new Date().toISOString(),
+    published_at: candidate.publishedAt || null,
+    pushed_at: null,
+  };
+}
+
+async function retryChineseSummary(env: Env, item: ItemRow, candidate: Candidate): Promise<string | undefined> {
+  if (!env.AI) return undefined;
+  try {
+    if (!(await reserveAiCall(env))) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  const prompt = [
+    'Rewrite ONE factual Simplified Chinese summary for the following AI intelligence item.',
+    'Return JSON only: {"summaryZh":"..."}.',
+    'Use 1-2 natural Chinese sentences, under 100 Chinese characters.',
+    'Mention the concrete subject/vendor/product and what changed.',
+    'Use only facts explicitly present in the evidence. Do not invent dates, prices, scope, deadlines, or rollout claims.',
+    `Kind: ${item.kind}`,
+    `Vendor: ${item.vendor || 'unknown'}`,
+    `Product: ${item.product || 'unknown'}`,
+    `Title: ${candidate.title}`,
+    `Evidence: ${(candidate.summary || candidate.rawExcerpt || '').slice(0, 1500)}`,
+  ].join('\n');
+
+  try {
+    const parsed = parseAiJson(await env.AI.run(env.AI_MODEL, { prompt, max_tokens: 160 }));
+    if (typeof parsed?.summaryZh !== 'string') return undefined;
+    const clean = parsed.summaryZh.replace(/\s+/g, ' ').trim().slice(0, 180);
+    return isGroundedChineseSummary(item, clean) ? clean : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function maybeEnrichWithAi(env: Env, source: SourceRow, candidate: Candidate, base: Classification): Promise<Classification> {
   if (env.AI_ENABLED !== 'true' || !env.AI) return base;
   if (base.score < 25) return base;
@@ -206,6 +280,7 @@ export async function maybeEnrichWithAi(env: Env, source: SourceRow, candidate: 
     '2. expiresAt ONLY represents an explicit expiration or deadline for a limited-time deal, trial offer, discount, or promotion.',
     '   NEVER use model creation date, publishedAt, release date, last modified date, benchmark observation date, or current date as expiresAt. Leave expiresAt null if there is no explicit expiration deadline.',
     '3. summaryZh MUST be 1-2 fluent, factual Simplified Chinese sentences (under 100 Chinese characters) explaining WHAT happened.',
+    '   Mention the concrete subject/vendor/product. Use only evidence below and do not invent dates, prices, scope, deadlines, or rollout claims.',
     '   DO NOT translate code blocks, roleplay instructions, chat templates, or prompt examples.',
     '   If no clear event happened, state clearly that the model was observed in the catalog/discovery feed.',
     `Source trust: ${source.trust_level}`,
@@ -217,23 +292,14 @@ export async function maybeEnrichWithAi(env: Env, source: SourceRow, candidate: 
   ].join('\n');
 
   try {
-    const result = await env.AI.run(env.AI_MODEL, { prompt, max_tokens: 256 });
-    const raw =
-      typeof result === 'string'
-        ? result
-        : result && typeof result === 'object' && 'response' in result && typeof result.response === 'string'
-        ? result.response
-        : JSON.stringify(result);
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) return base;
+    const parsed = parseAiJson(await env.AI.run(env.AI_MODEL, { prompt, max_tokens: 256 }));
+    if (!parsed) return base;
 
-    const parsed = JSON.parse(match[0]) as AiJson;
     const aiScore = Number.isFinite(parsed.score) ? Math.max(0, Math.min(100, Number(parsed.score))) : base.score;
     const protectedFloor = base.kind === 'new_model' || base.kind === 'model_api_available' || base.kind === 'model_open_source' ? 40 : 0;
     const score = base.priority === 'P1' ? Math.max(base.score, aiScore) : Math.max(protectedFloor, aiScore);
     const parsedKind = parsed.kind && AI_KINDS.has(parsed.kind) ? parsed.kind : base.kind;
 
-    // Guard against AI hallucinating new_model on old/discovered models
     let kind = parsedKind;
     if (base.kind === 'discovered_model' && parsedKind === 'new_model') {
       kind = 'discovered_model';
@@ -241,7 +307,6 @@ export async function maybeEnrichWithAi(env: Env, source: SourceRow, candidate: 
       kind = base.kind;
     }
 
-    // Strict expiresAt guard: if candidate is model-related or matches publishedAt, strip expiresAt
     let expiresAt: string | undefined = undefined;
     if (parsed.expiresAt && typeof parsed.expiresAt === 'string') {
       const isModelDiscovery = kind === 'new_model' || kind === 'discovered_model' || kind === 'model_api_available' || kind === 'model_open_source' || kind === 'model_benchmark';
@@ -251,35 +316,14 @@ export async function maybeEnrichWithAi(env: Env, source: SourceRow, candidate: 
       }
     }
 
-    // Summary quality gate
-    let summaryZh = base.summaryZh;
-    if (typeof parsed.summaryZh === 'string' && isHighQualityChineseSummary(parsed.summaryZh)) {
-      summaryZh = parsed.summaryZh.replace(/\s+/g, ' ').trim().slice(0, 180);
-    } else {
-      // Deterministic fallback summary
-      const dummyItem = {
-        id: 0,
-        source_id: source.id,
-        title: candidate.title,
-        summary: candidate.summary || null,
-        url: candidate.url || null,
-        kind,
-        priority: base.priority,
-        score,
-        source_confidence: base.sourceConfidence,
-        verification_status: base.verificationStatus,
-        vendor: parsed.vendor || base.vendor || null,
-        product: parsed.product || base.product || null,
-        previous_price: parsed.previousPrice ?? base.previousPrice ?? null,
-        current_price: parsed.currentPrice ?? base.currentPrice ?? null,
-        currency: parsed.currency || base.currency || null,
-        expires_at: expiresAt || null,
-        discovered_at: new Date().toISOString(),
-        published_at: candidate.publishedAt || null,
-        pushed_at: null,
-      };
-      summaryZh = buildChineseSummary(dummyItem);
+    const item = summaryItem(source, candidate, base, parsed, kind, score, expiresAt);
+    let summaryZh: string | undefined;
+    if (typeof parsed.summaryZh === 'string') {
+      const first = parsed.summaryZh.replace(/\s+/g, ' ').trim().slice(0, 180);
+      if (isGroundedChineseSummary(item, first)) summaryZh = first;
     }
+    if (!summaryZh) summaryZh = await retryChineseSummary(env, item, candidate);
+    if (!summaryZh) summaryZh = buildChineseSummary(item);
 
     return {
       ...base,
