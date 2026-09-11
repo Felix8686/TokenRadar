@@ -41,7 +41,7 @@ export function isHighQualityChineseSummary(text?: string): boolean {
   const clean = text.replace(/\s+/g, ' ').trim();
   if (clean.length < 8 || clean.length > 200) return false;
 
-  // This is only a surface-level sanity check. It cannot prove semantic quality.
+  // Surface sanity only; semantic grounding is checked separately.
   const chineseCharCount = (clean.match(/[\u4e00-\u9fff]/g) || []).length;
   if (chineseCharCount < 6) return false;
 
@@ -53,18 +53,86 @@ export function isHighQualityChineseSummary(text?: string): boolean {
     /translation:|translated:/i,
   ];
 
-  if (forbiddenPatterns.some((pattern) => pattern.test(clean))) {
-    return false;
-  }
-
+  if (forbiddenPatterns.some((pattern) => pattern.test(clean))) return false;
   if (/(.)\1{4,}/.test(clean)) return false;
-
   return true;
 }
 
-export function buildChineseSummary(item: ItemRow, _aiSummary?: string): string {
-  // User-facing Telegram copy must be deterministic.
-  // AI output may be grammatically plausible yet semantically wrong, so never emit it directly.
+function normalizeToken(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '');
+}
+
+function summaryAnchors(item: ItemRow): string[] {
+  const values = [item.vendor || '', item.product || '', item.title || ''];
+  const tokens = values.flatMap((value) => value.split(/[\s/|:：·()（）\-_]+/g));
+  return [...new Set(tokens.map(normalizeToken).filter((token) => token.length >= 2 && !['api', 'pricing', 'price', 'model', 'changed', 'update'].includes(token)))];
+}
+
+function kindGroundingPattern(kind: ItemRow['kind']): RegExp | null {
+  const patterns: Partial<Record<ItemRow['kind'], RegExp>> = {
+    free_credit: /免费|额度|赠送|试用|credit|quota/i,
+    limited_offer: /限时|优惠|折扣|促销|活动|discount|promo/i,
+    price_drop: /降价|下调|降低|便宜|价格|定价|计费/i,
+    price_change: /价格|定价|计费|调整|变化|变更/i,
+    new_plan: /套餐|计划|方案|plan/i,
+    new_model: /模型|发布|推出|上线/i,
+    model_api_available: /api|接口|调用|可用|开放/i,
+    model_open_source: /开源|开放权重|权重|许可证/i,
+    model_benchmark: /评测|榜单|基准|性能|benchmark/i,
+    discovered_model: /模型|发现|观测|收录|目录/i,
+    other: /更新|变化|变更|信息|调整/i,
+  };
+  return patterns[kind] || null;
+}
+
+function evidenceText(item: ItemRow): string {
+  return [
+    item.title,
+    item.summary || '',
+    item.vendor || '',
+    item.product || '',
+    item.previous_price != null ? String(item.previous_price) : '',
+    item.current_price != null ? String(item.current_price) : '',
+    item.currency || '',
+    item.expires_at || '',
+    item.published_at || '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+function introducedUnsupportedNumbers(summary: string, evidence: string): boolean {
+  const numbers = summary.match(/\d+(?:\.\d+)?%?/g) || [];
+  return numbers.some((value) => !evidence.includes(value.toLowerCase()));
+}
+
+function introducedUnsupportedTiming(summary: string, evidence: string): boolean {
+  const claims = ['今天', '今日', '明天', '本周', '本月', '立即', '马上', '全面执行', '正式生效', '永久', '无限期'];
+  return claims.some((claim) => summary.includes(claim) && !evidence.includes(claim));
+}
+
+export function isGroundedChineseSummary(item: ItemRow, text?: string): boolean {
+  if (!isHighQualityChineseSummary(text)) return false;
+  const clean = String(text).replace(/\s+/g, ' ').trim();
+  const normalized = normalizeToken(clean);
+  const anchors = summaryAnchors(item);
+  if (anchors.length && !anchors.some((anchor) => normalized.includes(anchor))) return false;
+
+  const kindPattern = kindGroundingPattern(item.kind);
+  if (kindPattern && !kindPattern.test(clean)) return false;
+
+  const evidence = evidenceText(item);
+  if (introducedUnsupportedNumbers(clean, evidence)) return false;
+  if (introducedUnsupportedTiming(clean, evidence)) return false;
+  return true;
+}
+
+export function buildChineseSummary(item: ItemRow, aiSummary?: string): string {
+  if (aiSummary && isGroundedChineseSummary(item, aiSummary)) {
+    return aiSummary.replace(/\s+/g, ' ').trim().slice(0, 180);
+  }
+
   const name = subject(item);
   const createdDate = item.published_at ? item.published_at.slice(0, 10) : undefined;
 
