@@ -41,11 +41,10 @@ export function isHighQualityChineseSummary(text?: string): boolean {
   const clean = text.replace(/\s+/g, ' ').trim();
   if (clean.length < 8 || clean.length > 200) return false;
 
-  // Must contain at least some Chinese characters
+  // This is only a surface-level sanity check. It cannot prove semantic quality.
   const chineseCharCount = (clean.match(/[\u4e00-\u9fff]/g) || []).length;
   if (chineseCharCount < 6) return false;
 
-  // Reject suspicious instructions, prompt leakage, garbled tokens, or roleplays
   const forbiddenPatterns = [
     /请你|请给我|给我一个|不得偷|扮演|忽略之前|system\s*prompt|assistant|user:|human:/i,
     /作为一个|作为一个AI|作为AI语言模型/i,
@@ -58,17 +57,14 @@ export function isHighQualityChineseSummary(text?: string): boolean {
     return false;
   }
 
-  // Reject nonsensical repetitive characters
   if (/(.)\1{4,}/.test(clean)) return false;
 
   return true;
 }
 
-export function buildChineseSummary(item: ItemRow, aiSummary?: string): string {
-  if (aiSummary && isHighQualityChineseSummary(aiSummary)) {
-    return aiSummary.replace(/\s+/g, ' ').trim().slice(0, 180);
-  }
-
+export function buildChineseSummary(item: ItemRow, _aiSummary?: string): string {
+  // User-facing Telegram copy must be deterministic.
+  // AI output may be grammatically plausible yet semantically wrong, so never emit it directly.
   const name = subject(item);
   const createdDate = item.published_at ? item.published_at.slice(0, 10) : undefined;
 
