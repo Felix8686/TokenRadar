@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "ai-radar",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-30",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/daily/*", "/latest"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ai-radar-db",
+      "database_id": "5bab76fa-866a-49dc-839e-febb583a71df",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "triggers": {
+    "crons": [
+      "*/5 * * * *",
+      "30 4 * * *"
+    ]
+  },
+  "vars": {
+    "APP_NAME": "AI-Radar",
+    "APP_TIMEZONE": "Asia/Shanghai",
+    "AI_ENABLED": "true",
+    "AI_MODEL": "@cf/meta/llama-3.1-8b-instruct-fast",
+    "AI_DAILY_CALL_LIMIT": "50",
+    "SOURCE_BATCH_SIZE": "10",
+    "PUBLIC_BASE_URL": "https://ai-radar.mzer8-substracker.workers.dev"
+  }
+}
